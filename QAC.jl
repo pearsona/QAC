@@ -5,9 +5,10 @@ using DWave, JLD, Plots
 #Changes to implement:
 # -store/retreive embedding code files within storage directory
 # -create more plots
+# -option to create, store, and retreive set of instances
 
 function runQAC(token ; solverName="DW2X", url="https://usci.qcc.isi.edu/sapi", #solver info
-    dir="test/", #storage info
+    dir="test/", #loadInsts = false, loadInstsFile = "",#storage info
     problem_size=288, num_insts=5, betas=[0.1, 0.2, 0.3, 0.4, 0.5], #QAC vs. C info
     num_per_call=10,  num_runs_dw=20, num_samples_dw=1000, num_runs_hfs=20, use_hfs=true, num_samples_hfs=1000, num_posterior_samples=1000) #experiment info
 
@@ -24,6 +25,13 @@ function runQAC(token ; solverName="DW2X", url="https://usci.qcc.isi.edu/sapi", 
 
     solver_size = props["num_qubits"] #USC DW2X = 1152
 
+    #if loadInsts
+    #    file = JLD.jldopen(loadInstsFile, "r")
+    #    instances = read(file)["instances"]
+
+    #    close(file)
+    #end
+
     successQAC = zeros(num_insts, 4)
     successC = zeros(num_insts, 3)
 
@@ -33,8 +41,14 @@ function runQAC(token ; solverName="DW2X", url="https://usci.qcc.isi.edu/sapi", 
 
     println("Starting")
     for i = 1:num_insts
+
+        #if loadInsts
+        #    inst = instances[i]
+        #else
         inst = generatePudenzInstance(solver_size/4, numBitsUsed = problem_size, solverName = solverName)
-        
+        #end
+
+
         # HFS for finding GS Energy
         #---------------------------
         if use_hfs
@@ -49,6 +63,7 @@ function runQAC(token ; solverName="DW2X", url="https://usci.qcc.isi.edu/sapi", 
             gs_e = false
         end
 
+
         # C/Repetition Code
         #-------------------
         # beta = 0 means no penalty bit (so rep code) and true means only one phys bit used (so 1 copy)
@@ -57,7 +72,7 @@ function runQAC(token ; solverName="DW2X", url="https://usci.qcc.isi.edu/sapi", 
         inst_c = applyEmbedding(rep_emb, inst)
         exper = ExperimentDescription(instance=inst_c, R=num_samples_dw, name=string("instC_", i), solver=:DWave,
             solver_properties=props,embedding_generator=eg, decode_opts=[1])
-        (_, es_dw, _) = run_experiment(exper, minruns=num_runs_dw*4,maxruns=num_runs_dw*4,vc=0,vcmode=:prob, N=num_per_call,
+        (_, es_dw, _) = run_experiment(exper, minruns=4*num_runs_dw,maxruns=4*num_runs_dw,vc=0,vcmode=:prob, N=num_per_call,
                 savesols=true,save_encoded=false,tosave=true, 
                 save_embeddings=false,coupleruns=false,savepath=dir,timeout=2.,verbose=true)
         
@@ -65,12 +80,13 @@ function runQAC(token ; solverName="DW2X", url="https://usci.qcc.isi.edu/sapi", 
         successC[i, :] = [mean(ps), std(ps), gs_e]
         
         
+        
         # Pudenz Code
         #-------------
         tempVals = zeros(3)
         for b in betas
             # Create the physical problem for the given beta
-            p_emb = PudenzEmbedding(beta = b)
+            p_emb = PudenzEmbedding(beta = b, codeName = solverName)
             inst_p = applyEmbedding(p_emb, inst)
             
             # Send pudenz/QAC problem off to DWave
