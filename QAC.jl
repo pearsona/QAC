@@ -1,15 +1,16 @@
-using DWave, JLD, Plots
+using DWave, Plots
 
 
 #Changes to implement:
 # -store/retreive embedding code files within storage directory
 # -create more plots
-# -option to create, store, and retreive set of instances
+# -ability to change annealing time (just parameter to ExperimentDescription)
 
 function runQAC(token::String ; solverName::String="DW2X", url::String="https://usci.qcc.isi.edu/sapi", #solver info
     dir::String="test/", inst_list = [], loadInsts::Bool = false, loadInstsFile::String = "instances.jld", verbose::Bool = false,#working info
     problem_size::Int64=288, num_insts::Int64=5, betas::Array{Float64}=[0.1, 0.2, 0.3, 0.4, 0.5], #QAC vs. C info
-    num_per_call::Int64=10,  use_dw::Bool = true, num_runs_dw::Int64=20, num_samples_dw::Int64=1000, num_runs_hfs::Int64=20, use_hfs::Bool=true, num_samples_hfs::Int64=1000, num_posterior_samples::Int64=1000) #experiment info
+    num_per_call::Int64=10, num_runs_dw::Int64=20, num_samples_dw::Int64=1000, num_runs_hfs::Int64=20, 
+    num_samples_hfs::Int64=1000, num_posterior_samples::Int64=1000, run_hfs::Bool=true, run_C::Bool=true, run_QAC::Bool=true) #experiment info
 
     #Create the directory if it doesn't exist
     dir[end] == '/' || (dir = string(dir, '/'))
@@ -43,25 +44,25 @@ function runQAC(token::String ; solverName::String="DW2X", url::String="https://
         println(i, " at ",  Dates.format(now(), "HH:MM"))
 
         loadInsts ? (inst = instances[i]) : (inst = generatePudenzInstance(log_solver_size, numBitsUsed = problem_size, solverName = solverName))
-
+        gs_e = false
 
         # HFS for finding GS Energy
         #---------------------------
-        gs_e = false
-        if use_hfs
+        if run_hfs #&& !isfile()
             verbose && println("Running HFS")
             exper = ExperimentDescription(instance=inst, R=num_samples_hfs, name=string("instHFS_", i),solver=:HFS, solver_properties=props, 
                 embedding_generator=hfs_eg, decode_opts=[1])
             (_, es, _) = run_experiment(exper, minruns=1,maxruns=num_runs_hfs,N=num_runs_hfs, vc=0,vcmode=:prob,
-                savesols=false,save_encoded=false,tosave=false, save_embeddings=false,coupleruns=false,timeout=2.,verbose=verbose)
+                savesols=false,save_encoded=false,tosave=true,savepath=dir,save_embeddings=false,coupleruns=false,timeout=2.,verbose=verbose)
             
             gs_e = minimum(es)
         end
+        inst.properties[:gse] = gs_e
 
 
-        if use_dw
+        if run_C
 
-            inst.properties[:gse] = gs_e
+            
 
             # C/Repetition Code
             #-------------------
@@ -75,7 +76,10 @@ function runQAC(token::String ; solverName::String="DW2X", url::String="https://
                     savesols=true,save_encoded=false,tosave=true, 
                     save_embeddings=false,coupleruns=false,savepath=dir,timeout=2.,verbose=verbose)
             
-            
+        end
+
+
+        if run_QAC
             # Pudenz Code
             #-------------
             for b in betas
@@ -89,24 +93,8 @@ function runQAC(token::String ; solverName::String="DW2X", url::String="https://
                     solver_properties=props,embedding_generator=eg, decode_opts=[1])
                 (_, es_dw_c, _) = run_experiment(exper, minruns=num_runs_dw,maxruns=num_runs_dw,vc=0,vcmode=:prob, N=num_per_call,
                         savesols=true,save_encoded=false,tosave=true, 
-                        save_embeddings=false,coupleruns=false,savepath=dir,timeout=2.,verbose=verbose)
-                
-                
+                        save_embeddings=false,coupleruns=false,savepath=dir,timeout=2.,verbose=verbose) 
             end
-        elseif use_hfs
-            fn = string(dir, "instC_", i, "/ExperimentDescriptions.jld2")
-            exper = load(fn)["ExperimentDescriptions"][1]
-            exper.instance.properties[:gse] = gs_e
-            f = jldopen(fn,g,compress=true)
-            f["ExperimentDescriptions"] = exper
-            save(fn,"ExperimentDescriptions",egs)
-
-            fn = string(dir, "instQAC_", i, "/ExperimentDescriptions.jld2")
-            exper = load(fn)["ExperimentDescriptions"][1]
-            exper.instance.properties[:gse] = gs_e
-            f = jldopen(fn,g,compress=true)
-            f["ExperimentDescriptions"] = exper
-            save(fn,"ExperimentDescriptions",egs)
         end
     end
 
@@ -129,45 +117,66 @@ end
 
 
 
-function analysis(;dir::String = "", inst_list::Array{Int64} = [1], betas = [0.1 0.2 0.3 0.4 0.5])
+function analysis(; dir::String = "", inst_list::Array{Int64} = [1], betas::Array{Float64} = [0.1 0.2 0.3 0.4 0.5], num_posterior_samples::Int64 = 1000)
 
     num_insts = length(inst_list)
     successC = Array{Float64}(num_insts, 3)
     successQAC = Array{Float64}(num_insts, 4)
 
-    if dir != ""
-        old_dir = pwd()
-        cd(dir)
-    end
+    dir[end] == '/' || (dir = string(dir, '/'))
 
-    for i in inst_list
+    for ix = 1:num_insts
+        i = inst_list[ix]
 
-        gs_e = load(string("instC_", i, "/ExperimentDescriptions.jld2"))["ExperimentDescriptions"][1].instance.properties[:gse]
 
-        res = load(string("instC_", i, "1.jld2"))
-        ps = get_posteriors(res["decoded_energies"],false,num_posterior_samples,true_Egs=gs_e)[:,end]
-        successC[i, :] = [mean(ps), std(ps), gs_e]
+        if isfile(string(dir, "instHFS_", i, "/1.jld2"))
+            gs_e = minimum(load(string(dir, "instHFS_", i, "/1.jld2"))["decoded_energies"])
+        elseif isfile(string(dir, "instC_", i, "/ExperimentDescriptions.jld2"))
+            desc = load(string(dir, "instC_", i, "/ExperimentDescriptions.jld2"))["ExperimentDescriptions"]
+            if typeof(desc) == Array{DWave.ExperimentDescription, 1}
+                prop = desc[1].instance.properties
+            else
+                prop = desc["ExperimentDescriptions"][1].instance.properties
+            end
+
+            if isdefined(:prop) && haskey(prop, :gse)
+                gs_e = prop[:gse]
+            else
+                gs_e = false
+                println("Unable to find ground state energy for instance ", i, ". Will use minimum found in dwave runs")
+            end
+        else
+            gs_e = false
+            println("Unable to find ground state energy for instance ", i, ". Will use minimum found in dwave runs")
+        end
+            
+
+        res = load(string(dir, "instC_", i, "/1.jld2"))
+        ps = get_posteriors(res["decoded_energies"],false,num_posterior_samples,true_Egs=minimum([gs_e; res["decoded_energies"]]))[:,end]
+        successC[ix, :] = [mean(ps), std(ps), gs_e]
 
         tempVals = [0.0 0.0 0.0]
         for j = 1:length(betas)
-            res = load(string("instQAC_", i, "/", j, ".jld2"))
+            res = load(string(dir, "instQAC_", i, "/", j, ".jld2"))
 
-            ps = get_posteriors(res["decoded_energies"],false,num_posterior_samples,true_Egs=gs_e)[:,end]
+            ps = get_posteriors(res["decoded_energies"],false,num_posterior_samples,true_Egs=minimum([gs_e; res["decoded_energies"]]))[:,end]
             if mean(ps) > tempVals[1]
                 tempVals = [mean(ps) std(ps) betas[j]]
             end
         end
 
-        successQAC[i, :] = [tempVals[1], tempVals[2], gs_e, tempVals[3]]
+        successQAC[ix, :] = [tempVals[1], tempVals[2], gs_e, tempVals[3]]
     end
 
-    save("successQAC.jld", successQAC)
-    save("successC.jld", successC)
+    save(string(dir, "successQAC.jld"), "success", successQAC)
+    save(string(dir, "successC.jld"), "success", successC)
 
     # Results
     #---------
-    scatter(successC[:, 1], successQAC[:, 1], m = ColorGradient(:rainbow), zcolor = successQAC[:, 4])
-    png("results")
+    scatter(successC[:, 1], successQAC[:, 1], m = ColorGradient(:rainbow), zcolor = successQAC[:, 4], colorbar = true, legend = false)
+    xmin = minimum(successC[:, 1]) - 0.015
+    xmax = maximum(successC[:, 1]) + 0.02
+    plot!(linspace(xmin, xmax), linspace(xmin, xmax))
 
-    dir == "" || cd(old_dir)
+    savefig(string(dir, "results"))
 end
