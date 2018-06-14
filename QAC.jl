@@ -76,14 +76,14 @@ function runQAC(token::String ; solverName::String="DW2X", url::String="https://
         
         # C/Repetition Code
         #-------------------
-        # beta = 0 means no penalty bit (so rep code) and true means only one phys bit used (so 1 copy)
+        # beta = 0 means no penalty bit (so rep code) and true means only one phys bit used (so 1 copy), but will get 4X the samples
         if run_C
             verbose && println("Running Repetition code")
             rep_emb = PudenzEmbedding(beta = 0.0, repCode = true, problemSize = problem_size, codeName = solverName)
             inst_c = applyEmbedding(rep_emb, inst)
-            exper = ExperimentDescription(instance=inst_c, R=num_samples_DW, name=string("instC_", i), solver=:DWave,
+            exper = ExperimentDescription(instance=inst_c, R=4*num_samples_DW, name=string("instC_", i), solver=:DWave,
                 solver_properties=props,embedding_generator=eg, decode_opts=[1])
-            run_experiment(exper, minruns=4*num_runs_DW,maxruns=4*num_runs_DW,vc=0,vcmode=:prob, N=num_gauges,
+            run_experiment(exper, minruns=num_runs_DW,maxruns=num_runs_DW,vc=0,vcmode=:prob, N=num_gauges,
                     savesols=true,save_encoded=false,tosave=true, 
                     save_embeddings=false,coupleruns=false,savepath=dir,timeout=2.,verbose=verbose)
         end
@@ -135,6 +135,11 @@ function analysis(; dir::String = "", inst_list::Array{Int64} = [1], verbose::Bo
     successC = Array{Float64}(num_insts, 3)
     successQAC = Array{Float64}(num_insts, 4)
 
+    #keep track of how many times each solver worked
+    #1: HFS, 2: C, 3-7: QAC w/ betas
+    counts = [0.0 0.0 0.0 0.0 0.0 0.0 0.0]
+    which_solver = 0
+
     dir[end] == '/' || (dir = string(dir, '/'))
 
     for ix = 1:num_insts
@@ -145,6 +150,7 @@ function analysis(; dir::String = "", inst_list::Array{Int64} = [1], verbose::Bo
             if isfile(string(dir, "instHFS_", i, "/1.jld2"))
                 gs_e = minimum(load(string(dir, "instHFS_", i, "/1.jld2"))["decoded_energies"])
                 verbose && println(i, " gs_e = ", gs_e, " (HFS)")
+                which_solver = 1
             else
                 gs_e = 100000000.0
                 println("Unable to find ground state energy for instance ", i, ". Will use minimum found across DWave runs")
@@ -156,14 +162,23 @@ function analysis(; dir::String = "", inst_list::Array{Int64} = [1], verbose::Bo
             gs_e = minimum([gs_e; resC["decoded_energies"]])
             (verbose && tmp != gs_e) && println(i, " gs_e = ", gs_e, " (C)")
 
+            if abs(tmp - gs_e) >= 1e-9
+                which_solver = 2
+            end
+
             resQ = []
             for j = 1:length(betas)
                 push!(resQ, load(string(dir, "instQAC_", i, "/", j, ".jld2")))
                 tmp = gs_e
                 gs_e = minimum([gs_e; resQ[j]["decoded_energies"]])
                 (verbose && tmp != gs_e) && println(i, " gs_e = ", gs_e, " (QAC, beta = ", betas[j], ")")
+                
+                if abs(tmp - gs_e) >= 1e-9
+                    which_solver = 2 + j
+                end
             end
 
+            counts[which_solver] = counts[which_solver] + 1
 
             ps = get_posteriors(resC["decoded_energies"],false,num_posterior_samples,true_Egs=gs_e)[:,end]
             successC[ix, :] = [mean(ps), std(ps), gs_e]
@@ -178,11 +193,15 @@ function analysis(; dir::String = "", inst_list::Array{Int64} = [1], verbose::Bo
             end
 
             successQAC[ix, :] = [tempVals[1], tempVals[2], gs_e, tempVals[3]]
+
+            println("\n\n")
         catch e
             println(e)
             println(ix)
         end
     end
+
+    println("Counts that HFS, C, QAC- 0.1, 0.2, 0.3, 0.4, 0.5 got the gs: ", counts, " out of ", num_insts)
 
     save(string(dir, "successQAC.jld"), "success", successQAC)
     save(string(dir, "successC.jld"), "success", successC)
