@@ -27,7 +27,7 @@ function runQAC(token::String ; solverName::String="DW2X", url::String="https://
     mkpath(dir)
 
     
-    isfile(string(solverName, "_code.jld")) || generatePudenzCode(solver=solv, codeName=solverName)
+    isfile(string(solverName, "_code.jld")) || generatePudenzCode(solver=solverName, codeName=solverName)
     
     if isfile(string(solverName, "_props.jld"))
         props = load(string(solverName, "_props.jld"))["props"]
