@@ -20,25 +20,26 @@ function runQAC(token::String ; solverName::String="DW2X", url::String="https://
     dir::String="test/", inst_list::Union{Array{Int64}, UnitRange{Int64}} = [], loadInsts::Bool = false, loadInstsFile::String = "instances.jld", verbose::Bool = false,#working info
     problem_size::Int64=288, num_insts::Int64=5, betas::Array{Float64}=[0.1, 0.2, 0.3, 0.4, 0.5], #QAC vs. C info
     annealing_times::Array{Int64}=[5], num_gauges::Int64=20, num_runs_DW::Int64=20, num_samples_DW::Int64=1000, num_runs_HFS::Int64=20,
-    num_samples_HFS::Int64=1000, run_HFS::Bool=true, run_C::Bool=true, run_QAC::Bool=true, mark_annealing_time::Bool = true) #experiment info
+    num_samples_HFS::Int64=1000, run_HFS::Bool=true, run_C::Bool=true, run_QAC::Bool=true, mark_annealing_time::Bool = true, async::Bool = false) #experiment info
 
     #Create the directory if it doesn't exist
     dir[end] == '/' || (dir = string(dir, '/'))
     mkpath(dir)
 
     
-    isfile(string(solverName, "_code.jld")) || generatePudenzCode(solver=solverName, codeName=solverName)
+    isfile(string("embeddings/", solverName, "_code.jld")) || generatePudenzCode(solver=solverName, codeName=solverName)
     
-    if isfile(string(solverName, "_props.jld"))
-        props = load(string(solverName, "_props.jld"))["props"]
+    if isfile(string("embeddings/", solverName, "_props.jld"))
+        props = load(string("embeddings/", solverName, "_props.jld"))["props"]
     else
         props = DWave.dwrm.RemoteConnection(url, token)[:get_solver](solverName)[:properties]
-        save(string(solverName, "_props.jld"), "props", props)
+        save(string("embeddings/", solverName, "_props.jld"), "props", props)
     end
 
     props[:token] = token
     props[:url] = url
     props[:solver_name] = solverName
+    props[:answer_mode] = "histogram"
 
     solver_size = props["num_qubits"] #USC DW2X = 1152, NASA 2000q = 2048
     log_solver_size = ceil(Int, solver_size/4)
@@ -52,12 +53,38 @@ function runQAC(token::String ; solverName::String="DW2X", url::String="https://
     eg = EmbeddingGenerator([GaugeEmbedding=>solver_size])
     HFS_eg = EmbeddingGenerator([GaugeEmbedding=>log_solver_size]) #need to create a gauge of largest size possible to work with code
 
+    cName = string("embeddings/", solverName)
+    
 
-    rep_emb = PudenzEmbedding(beta = 0.0, repCode = true, problemSize = problem_size, codeName = solverName)
+    #Precompute/load embeddings of all instances
+    if isfile(string(dir, "c_instances.jld"))
+        c_insts = load(string(dir, "c_instances.jld"), "instances")
+    else
+        rep_emb = PudenzEmbedding(beta = 0.0, repCode = true, problemSize = problem_size, codeName = cName, numPhysBits = solver_size)
+        c_insts = []
 
-    p_emb = []
+        for inst in instances
+            push!(c_insts, applyEmbedding(rep_emb, inst))
+        end
+
+        save(string(dir, "c_instances.jld"), "instances", c_insts)
+    end
+
+    p_insts = []
     for b in betas
-        push!(p_emb, PudenzEmbedding(beta = b, problemSize = problem_size, codeName = solverName))
+        if isfile(string(dir, "p", b, "_instances.jld"))
+            push!(p_insts, load(string(dir, "p", b, "_instances.jld"), "instances"))
+        else
+            p_emb = PudenzEmbedding(beta = b, problemSize = problem_size, codeName = cName, numPhysBits = solver_size)
+            tmp = []
+
+            for inst in instances
+                push!(tmp, applyEmbedding(p_emb, inst))
+            end
+
+            push!(p_insts, tmp)
+            save(string(dir, "p", b, "_instances.jld"), "instances", tmp)
+        end
     end
             
     length(inst_list) == 0 && (inst_list = 1:num_insts)
@@ -96,11 +123,11 @@ function runQAC(token::String ; solverName::String="DW2X", url::String="https://
                 fn = string("instC_", i)
                 mark_annealing_time && (fn = string(fn, "_", annealing_times[a]))
 
-                exper = ExperimentDescription(instance=applyEmbedding(rep_emb, inst), R=4*num_samples_DW, name=fn, solver=:DWave,
-                    solver_properties=props,embedding_generator=eg, decode_opts=[1])
-                run_experiment(exper, minruns=num_runs_DW,maxruns=num_runs_DW,vc=0,vcmode=:prob, N=num_gauges,
-                        savesols=true,save_encoded=false,tosave=true, 
-                        save_embeddings=false,coupleruns=false,savepath=dir,timeout=2.,verbose=verbose)
+                run_experiment(ExperimentDescription(instance=c_insts[i], R=4*num_samples_DW, name=fn, solver=:DWave,
+                    solver_properties=props,embedding_generator=eg, decode_opts=[1]), 
+                                minruns=num_runs_DW,maxruns=num_runs_DW,vc=0,vcmode=:prob, N=num_gauges,
+                                savesols=true,save_encoded=false,tosave=true, 
+                                save_embeddings=false,coupleruns=false,savepath=dir,timeout=2.,verbose=verbose, async=async)
             end
         end
 
@@ -118,11 +145,11 @@ function runQAC(token::String ; solverName::String="DW2X", url::String="https://
                     fn = string("instQAC_", i)
                     mark_annealing_time && (fn = string(fn, "_", annealing_times[a]))
 
-                    exper = ExperimentDescription(instance=applyEmbedding(p_emb[j], inst), R=num_samples_DW, name=fn,solver=:DWave, 
-                        solver_properties=props,embedding_generator=eg, decode_opts=[1])
-                    run_experiment(exper, minruns=num_runs_DW,maxruns=num_runs_DW,vc=0,vcmode=:prob, N=num_gauges,
-                            savesols=true,save_encoded=false,tosave=true, 
-                            save_embeddings=false,coupleruns=false,savepath=dir,timeout=2.,verbose=verbose) 
+                    run_experiment(ExperimentDescription(instance=p_insts[j][i], R=num_samples_DW, name=fn,solver=:DWave, 
+                        solver_properties=props,embedding_generator=eg, decode_opts=[1]), 
+                                minruns=num_runs_DW,maxruns=num_runs_DW,vc=0,vcmode=:prob, N=num_gauges,
+                                savesols=true,save_encoded=false,tosave=true, 
+                                save_embeddings=false,coupleruns=false,savepath=dir,timeout=2.,verbose=verbose, async=async) 
                 end
             end
         end
